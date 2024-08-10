@@ -385,9 +385,8 @@ app.get('/boards', async (req, res) => {
   }
 });
 
-// Route to sync pins from Pinterest to Miro
 app.get('/sync-pins', async (req, res) => {
-  let pins; // Initialize pins variable
+  let pins;
   try {
       // Fetch the Pinterest pins using your Pinterest access token
       pins = await fetchPinsFromPinterest(req.cookies.pinterestAccessToken);
@@ -400,65 +399,84 @@ app.get('/sync-pins', async (req, res) => {
           throw new TypeError(`Expected pins to be an array, but received: ${typeof pins}`);
       }
 
+      // Fetch existing images on the Miro board to detect duplicates
+      const miroImages = await axios.get(`https://api.miro.com/v2/boards/${req.query.miroBoard}/images`, {
+          headers: { Authorization: `Bearer ${req.cookies.miroAccessToken}` }
+      });
+
+      const existingImages = miroImages.data.data || [];
+      const existingImageUrls = new Set(existingImages.map(img => img.url));
+      const existingPinIds = new Set(
+          existingImages
+              .filter(img => img.title && pins.some(pin => pin.id === img.title)) // Check if title matches any pin ID
+              .map(img => img.title)
+      );
+
+      // Define initial position and gap for placing images
+      let xPos = 0;
+      const gap = 50;
+
       // Iterate over each pin and post the image to Miro
       for (const pin of pins) {
           console.log("Processing Pin ID:", pin.id);
 
+          if (existingPinIds.has(pin.id)) {
+              console.log(`Pin ID ${pin.id} already exists on Miro board. Skipping.`);
+              continue;
+          }
+
           if (pin.media && pin.media.images) {
-              // Attempt to use the 'original' image if available, else fall back to another size
               const imageUrl = pin.media.images['original']?.url ||
                   pin.media.images['1200x']?.url ||
                   pin.media.images['600x']?.url ||
                   pin.media.images['400x300']?.url ||
                   pin.media.images['150x150']?.url;
 
-              if (imageUrl) {
+              if (imageUrl && !existingImageUrls.has(imageUrl)) {
                   console.log('Pin image URL:', imageUrl);
 
-                 // Corrected payload construction
-const payload = {
-  data: {
-      url: imageUrl, // Use the selected image URL
-      title: pin.title || 'Untitled' // Provide a fallback if the title is null/empty
-      // Removed 'description' field as it's not supported by the Miro API
-  }
-};
+                  const payload = {
+                      data: {
+                          url: imageUrl,
+                          title: pin.id,  // Use the Pin ID as the title for easier duplicate detection
+                      },
+                      position: {
+                          x: xPos,
+                          y: 0,  // Keep images in a single row
+                      }
+                  };
 
-console.log("Miro API Request Payload:", JSON.stringify(payload, null, 2));
+                  try {
+                      const miroResponse = await axios.post(`https://api.miro.com/v2/boards/${req.query.miroBoard}/images`, payload, {
+                          headers: {
+                              Authorization: `Bearer ${req.cookies.miroAccessToken}`,
+                              'Content-Type': 'application/json',
+                          }
+                      });
 
-try {
-  // Post each pin image to the Miro board
-  const miroResponse = await axios.post(`https://api.miro.com/v2/boards/${req.query.miroBoard}/images`, payload, {
-      headers: {
-          Authorization: `Bearer ${req.cookies.miroAccessToken}`,
-          'Content-Type': 'application/json',
-      }
-  });
-
-  // Check if the image was successfully created
-  if (miroResponse && miroResponse.data && miroResponse.data.id) {
-      console.log(`Pin ID ${pin.id} successfully created on Miro board with ID: ${miroResponse.data.id}`);
-  } else {
-      console.warn(`Pin ID ${pin.id} failed to create on Miro board.`);
-  }
-} catch (err) {
-  if (err.response) {
-      if (err.response.status === 400) {
-          console.error(`400 Error: Invalid parameters sent to Miro API for Pin ID ${pin.id}.`);
-          console.error("Miro API Error Response Data:", JSON.stringify(err.response.data, null, 2));
-      } else if (err.response.status === 404) {
-          console.error(`404 Error: The requested Miro board ID ${req.query.miroBoard} was not found.`);
-      } else {
-          console.error(`Error creating image for Pin ID ${pin.id}:`, err);
-      }
-  } else {
-      console.error(`Error creating image for Pin ID ${pin.id}:`, err);
-  }
-}
-
+                      if (miroResponse && miroResponse.data && miroResponse.data.id) {
+                          console.log(`Pin ID ${pin.id} successfully created on Miro board with ID: ${miroResponse.data.id}`);
+                          xPos += gap;  // Update xPos for the next image, add gap only
+                      } else {
+                          console.warn(`Pin ID ${pin.id} failed to create on Miro board.`);
+                      }
+                  } catch (err) {
+                      if (err.response) {
+                          if (err.response.status === 400) {
+                              console.error(`400 Error: Invalid parameters sent to Miro API for Pin ID ${pin.id}.`);
+                              console.error("Miro API Error Response Data:", JSON.stringify(err.response.data, null, 2));
+                          } else if (err.response.status === 404) {
+                              console.error(`404 Error: The requested Miro board ID ${req.query.miroBoard} was not found.`);
+                          } else {
+                              console.error(`Error creating image for Pin ID ${pin.id}:`, err);
+                          }
+                      } else {
+                          console.error(`Error creating image for Pin ID ${pin.id}:`, err);
+                      }
+                  }
 
               } else {
-                  console.warn(`Pin ID ${pin.id} does not have any usable image data.`);
+                  console.warn(`Pin ID ${pin.id} does not have any usable image data or already exists.`);
               }
           } else {
               console.warn(`Pin ID ${pin.id} is missing media or images data.`);
@@ -480,6 +498,10 @@ try {
       res.status(500).send('Failed to sync pins. Check server logs for details.');
   }
 });
+
+
+
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
