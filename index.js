@@ -156,6 +156,23 @@ passport.use('miro', new OAuth2Strategy({
   }
 ));
 
+// Function to fetch pins from Pinterest using an access token
+async function fetchPinsFromPinterest(accessToken) {
+  try {
+    const response = await axios.get('https://api.pinterest.com/v5/pins', {
+      headers: {
+        'Authorization': `Bearer ${accessToken}`
+      }
+    });
+
+    console.log('Fetched pins from Pinterest:', response.data.items);
+    return response.data.items; // Assuming the pins are located in response.data.items
+  } catch (error) {
+    console.error('Error fetching pins from Pinterest:', error);
+    throw error;
+  }
+}
+
 // Middleware to check if both tokens are present
 function ensureAuthenticated(req, res, next) {
   if (req.cookies.pinterestAccessToken && req.cookies.miroAccessToken) {
@@ -191,7 +208,14 @@ app.get('/', (req, res) => {
 });
 
 app.get('/auth/pinterest', (req, res, next) => {
-  console.log('Entering /auth/pinterest route');
+  const redirectUri = process.env.PINTEREST_REDIRECT_URI || 'http://localhost:3000/auth/pinterest/callback';
+  const clientId = process.env.PINTEREST_APP_ID;
+
+  // Debugging: Log the client ID and the generated OAuth URL
+  console.log("Pinterest App ID:", clientId);
+  console.log("Pinterest Redirect URI:", redirectUri);
+
+  const pinterestOAuthUrl = `https://www.pinterest.com/oauth/?response_type=code&redirect_uri=${redirectUri}&client_id=${clientId}&scope=boards:read,pins:read,boards:read_secret,pins:read_secret`;
 
   // Clear old tokens if the session is not authenticated
   if (!req.isAuthenticated()) {
@@ -200,14 +224,17 @@ app.get('/auth/pinterest', (req, res, next) => {
     console.log('Cleared old tokens due to unauthenticated session.');
   }
 
+  // If both tokens are present, redirect to /boards
   if (req.cookies.pinterestAccessToken && req.cookies.miroAccessToken) {
     console.log('Both tokens are present, redirecting to /boards');
-    return res.redirect('/boards');  // Both tokens are already present
+    return res.redirect('/boards');
   }
 
   console.log('Starting Pinterest authentication');
-  passport.authenticate('pinterest')(req, res, next);
+  console.log("Pinterest OAuth URL:", pinterestOAuthUrl);
+  res.redirect(pinterestOAuthUrl);
 });
+
 
 app.get('/auth/pinterest/callback', (req, res, next) => {
   passport.authenticate('pinterest', (err, user, info) => {
@@ -226,35 +253,15 @@ app.get('/auth/pinterest/callback', (req, res, next) => {
         console.error('Login error:', loginErr);
         return res.status(500).send('Login error. Please try again.');
       }
-      res.cookie('pinterestAccessToken', user.pinterestAccessToken, { httpOnly: true });
-      console.log('Pinterest token stored in cookie:', user.pinterestAccessToken);
-      req.session.userId = user._id;
 
-      // Redirect back to the login page to complete the authentication process for both services
-      return res.redirect('/');
+      console.log('User logged in successfully');
+      res.cookie('pinterestAccessToken', user.pinterestAccessToken, { httpOnly: true });
+      res.redirect('/boards');
     });
   })(req, res, next);
 });
 
-// Miro authentication routes
-app.get('/auth/miro', (req, res, next) => {
-  console.log('Entering /auth/miro route');
-
-  // Clear old tokens if the session is not authenticated
-  if (!req.isAuthenticated()) {
-    res.clearCookie('pinterestAccessToken');
-    res.clearCookie('miroAccessToken');
-    console.log('Cleared old tokens due to unauthenticated session.');
-  }
-
-  if (req.cookies.pinterestAccessToken && req.cookies.miroAccessToken) {
-    console.log('Both tokens are present, redirecting to /boards');
-    return res.redirect('/boards');  // Both tokens are already present
-  }
-
-  console.log('Starting Miro authentication');
-  passport.authenticate('miro')(req, res, next);
-});
+app.get('/auth/miro', passport.authenticate('miro'));
 
 app.get('/auth/miro/callback', (req, res, next) => {
   passport.authenticate('miro', (err, user, info) => {
@@ -273,17 +280,15 @@ app.get('/auth/miro/callback', (req, res, next) => {
         console.error('Login error:', loginErr);
         return res.status(500).send('Login error. Please try again.');
       }
-      res.cookie('miroAccessToken', user.miroAccessToken, { httpOnly: true });
-      req.session.userId = user._id;
-      console.log('Miro token stored in cookie:', user.miroAccessToken);
 
-      // Redirect back to the login page to complete the authentication process for both services
-      return res.redirect('/');
+      console.log('User logged in successfully');
+      res.cookie('miroAccessToken', user.miroAccessToken, { httpOnly: true });
+      res.redirect('/boards');
     });
   })(req, res, next);
 });
 
-// Boards route to show Pinterest and Miro boards
+// The /boards route
 app.get('/boards', async (req, res) => {
   if (!req.isAuthenticated()) {
     console.log('User not authenticated, redirecting to /');
@@ -332,7 +337,7 @@ app.get('/boards', async (req, res) => {
     }
 
     res.send(`
-      <form action="/sync" method="post">
+      <form action="/sync-pins" method="get">
         <label for="pinterestBoard">Select Pinterest Board:</label>
         <select name="pinterestBoard">
           ${pinterestBoards.map(board => `<option value="${board.id}">${board.name}</option>`).join('')}
@@ -380,44 +385,95 @@ app.get('/boards', async (req, res) => {
   }
 });
 
-
-
-
-// Sync Pinterest pins to Miro board
-app.post('/sync', async (req, res) => {
-  const { pinterestBoard, miroBoard } = req.body;
-  const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) });
-
-  if (!user || !req.cookies.pinterestAccessToken || !req.cookies.miroAccessToken) {
-    console.log('User or tokens missing, redirecting to /');
-    return res.redirect('/');
-  }
-
+// Route to sync pins from Pinterest to Miro
+app.get('/sync-pins', async (req, res) => {
+  let pins; // Initialize pins variable
   try {
-    const pinsResponse = await axios.get(`https://api.pinterest.com/v5/boards/${pinterestBoard}/pins/`, {
-      headers: { Authorization: `Bearer ${req.cookies.pinterestAccessToken}` }
-    });
+      // Fetch the Pinterest pins using your Pinterest access token
+      pins = await fetchPinsFromPinterest(req.cookies.pinterestAccessToken);
 
-    const pins = pinsResponse.data.data;
+      // Logging the retrieved pins for debugging
+      console.log("Fetched Pins:", JSON.stringify(pins, null, 2));
 
-    // Create Miro Images for each pin
-    for (const pin of pins) {
-      await axios.post(`https://api.miro.com/v1/boards/${miroBoard}/images`, {
-        url: pin.image.original.url
-      }, {
-        headers: { Authorization: `Bearer ${req.cookies.miroAccessToken}` }
-      });
-    }
+      // Check if the pins are an array
+      if (!Array.isArray(pins)) {
+          throw new TypeError(`Expected pins to be an array, but received: ${typeof pins}`);
+      }
 
-    console.log('Pins synced to Miro board successfully');
-    res.send('Pins synced to Miro board successfully!');
+      // Iterate over each pin and post the image to Miro
+      for (const pin of pins) {
+          console.log("Processing Pin ID:", pin.id);
+
+          if (pin.media && pin.media.images) {
+              // Attempt to use the 'original' image if available, else fall back to another size
+              const imageUrl = pin.media.images['original']?.url || 
+                               pin.media.images['1200x']?.url || 
+                               pin.media.images['600x']?.url || 
+                               pin.media.images['400x300']?.url || 
+                               pin.media.images['150x150']?.url;
+
+              if (imageUrl) {
+                  console.log('Pin image URL:', imageUrl);
+
+                  try {
+                      // Post each pin image to the Miro board
+                      const miroResponse = await axios.post(`https://api.miro.com/v2/boards/${req.query.miroBoard}/images`, {
+                          data: {
+                              url: imageUrl,
+                              title: pin.title || 'Untitled',
+                              description: pin.description || '',
+                          }
+                      }, {
+                          headers: {
+                              Authorization: `Bearer ${req.cookies.miroAccessToken}`,
+                              'Content-Type': 'application/json'
+                          }
+                      });
+
+                      // Check if the image was successfully created
+                      if (miroResponse && miroResponse.data && miroResponse.data.id) {
+                          console.log(`Pin ID ${pin.id} successfully created on Miro board with ID: ${miroResponse.data.id}`);
+                      } else {
+                          console.warn(`Pin ID ${pin.id} failed to create on Miro board.`);
+                      }
+                  } catch (err) {
+                      if (err.response && err.response.status === 404) {
+                          console.error(`404 Error: The requested Miro board ID ${req.query.miroBoard} was not found.`);
+                      } else {
+                          console.error(`Error creating image for Pin ID ${pin.id}:`, err);
+                      }
+                  }
+
+              } else {
+                  console.warn(`Pin ID ${pin.id} does not have any usable image data.`);
+              }
+          } else {
+              console.warn(`Pin ID ${pin.id} is missing media or images data.`);
+          }
+      }
+
+      console.log('All pins synced to Miro board successfully');
+      res.send('Pins synced to Miro board successfully!');
   } catch (error) {
-    console.error('Error syncing pins:', error);
-    res.status(500).send('Error syncing pins to Miro. Please try again later.');
+      // Verbose error logging
+      console.error("Error syncing pins:", error);
+      console.error("Error details:", {
+          message: error.message,
+          stack: error.stack,
+          name: error.name,
+          pinsData: pins || 'No pins data available' // Include the data that caused the error, if available
+      });
+
+      res.status(500).send('Failed to sync pins. Check server logs for details.');
   }
 });
 
-// Start the server
+
+
+
+
+
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
