@@ -416,20 +416,24 @@ app.get('/sync-pins', async (req, res) => {
                   console.log('Pin image URL:', imageUrl);
 
                   try {
+                      // Ensure that the Miro board ID and image URL are properly formatted
+                      const miroBoardId = encodeURIComponent(req.query.miroBoard);
+                      const encodedImageUrl = encodeURIComponent(imageUrl);
+
                       // Post each pin image to the Miro board
-                      const miroResponse = await axios.post(`https://api.miro.com/v2/boards/${req.query.miroBoard}/images`, {
+                      const miroResponse = await axios.post(`https://api.miro.com/v2/boards/${miroBoardId}/images`, {
                           data: {
-                              url: imageUrl,
-                              title: pin.title || 'Untitled',
-                              description: pin.description || '',
+                              url: encodedImageUrl,
+                              title: pin.title || 'Untitled', // Provide a fallback if the title is null/empty
+                              description: pin.description || '', // Provide a fallback if the description is null/empty
                           }
                       }, {
                           headers: {
                               Authorization: `Bearer ${req.cookies.miroAccessToken}`,
-                              'Content-Type': 'application/json'
+                              'Content-Type': 'application/json',
                           }
                       });
-
+                  
                       // Check if the image was successfully created
                       if (miroResponse && miroResponse.data && miroResponse.data.id) {
                           console.log(`Pin ID ${pin.id} successfully created on Miro board with ID: ${miroResponse.data.id}`);
@@ -437,7 +441,9 @@ app.get('/sync-pins', async (req, res) => {
                           console.warn(`Pin ID ${pin.id} failed to create on Miro board.`);
                       }
                   } catch (err) {
-                      if (err.response && err.response.status === 404) {
+                      if (err.response && err.response.status === 400) {
+                          console.error(`400 Error: Invalid parameters sent to Miro API for Pin ID ${pin.id}.`);
+                      } else if (err.response && err.response.status === 404) {
                           console.error(`404 Error: The requested Miro board ID ${req.query.miroBoard} was not found.`);
                       } else {
                           console.error(`Error creating image for Pin ID ${pin.id}:`, err);
@@ -467,9 +473,6 @@ app.get('/sync-pins', async (req, res) => {
       res.status(500).send('Failed to sync pins. Check server logs for details.');
   }
 });
-
-
-
 
 
 
